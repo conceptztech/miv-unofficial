@@ -1,0 +1,40 @@
+{
+  "name": "miv-unofficial",
+  "version": "1.0.0",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "build:android:development": "npx eas-cli@latest build --profile development --platform android",
+    "build:android:preview": "npx eas-cli@latest build --profile preview --platform android",
+    "build:android:production": "npx eas-cli@latest build --profile production --platform android",
+    "build:ios:development": "npx eas-cli@latest build --profile development --platform ios",
+    "build:ios:preview": "npx eas-cli@latest build --profile preview --platform ios",
+    "build:ios:production": "npx eas-cli@latest build --profile production --platform ios",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "expo": "~56.0.11",
+    "expo-dev-client": "~56.0.20",
+    "expo-haptics": "~56.0.3",
+    "expo-keep-awake": "~56.0.3",
+    "expo-notifications": "~56.0.17",
+    "expo-splash-screen": "~56.0.10",
+    "expo-updates": "~56.0.19",
+    "lucide-react-native": "^1.17.0",
+    "react": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-svg": "15.15.4",
+    "react-native-webview": "13.16.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.29.7",
+    "@types/react": "~19.2.17",
+    "typescript": "~6.0.3"
+  }
+}
