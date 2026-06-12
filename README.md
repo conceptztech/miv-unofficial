@@ -33,6 +33,7 @@ npm run build:android:production
 ## Credits
 
 Developed by [Creative Conceptz Solutions](https://conceptz.com.ng).
+First developed in June 2026.
 
 ## Note
 
