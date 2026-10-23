@@ -2,6 +2,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as KeepAwake from 'expo-keep-awake';
 import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
+import * as WebBrowser from 'expo-web-browser';
+import { device } from './src/device';
+import { isPdfUrl, browserDocumentUrl } from './src/navigation';
+import { LoadingState } from './src/loading';
+import { buildPageBridgeScript } from './src/pageBridge';
+import { buildLoginFillScript, type LoginDetails } from './src/secureLogin';
+import { SecureLoginContent } from './src/SecureLoginContent';
 import {
   ArrowLeft,
   ArrowRight,
@@ -12,7 +19,9 @@ import {
   Check,
   Clock3,
   ExternalLink,
+  Fingerprint,
   GraduationCap,
+  History,
   Headphones,
   Info,
   Menu,
@@ -30,9 +39,11 @@ import {
   Alert,
   Animated,
   BackHandler,
+  AppState,
   FlatList,
   Image,
   Linking,
+  KeyboardAvoidingView,
   Modal,
   PanResponder,
   Platform,
@@ -60,11 +71,11 @@ const KEEP_AWAKE_RELEASE_TAGS = [KEEP_AWAKE_TAG, 'miva-unofficial-lecture-mode',
 const VIDEO_PREF_KEY = 'miv-unofficial.video-preferences.v1';
 const KEEP_AWAKE_KEY = 'miv-unofficial.keep-awake.v1';
 const LAST_URL_KEY = 'miv-unofficial.last-url.v1';
+const RESUME_SESSION_KEY = 'miv-unofficial.resume-session.v1';
 const REMINDER_KEY = 'miv-unofficial.learning-reminder.v1';
 const REMINDER_CHANNEL_ID = 'learning-reminders-v2';
 const REMINDER_SOUND_FILE = 'miv_reminder.wav';
 const MIV_LOGO = require('./assets/miv-logo.png') as number;
-
 type QualityPreference = 'auto' | '360' | '480' | '720' | '1080';
 
 type VideoPreferences = {
@@ -78,10 +89,10 @@ type ReminderSettings = {
   minute: number;
   notificationId: string | null;
 };
-
 type DrawerItem = {
   label: string;
   url?: string;
+  externalUrl?: string;
   Icon: typeof BookOpen;
   action?: 'settings' | 'misc';
 };
@@ -96,7 +107,17 @@ type WebMessage =
     }
   | {
       type: 'web-layer-ready';
-    };
+    }
+  | {
+      type: 'pull-refresh';
+    }
+  | {
+      type: 'open-pdf';
+      url?: string;
+    }
+  | { type: 'navigation-start'; url?: string }
+  | { type: 'video-state'; playing: boolean }
+  | { type: 'login-filled'; ok: boolean };
 
 const DEFAULT_VIDEO_PREFS: VideoPreferences = {
   speed: 1,
@@ -114,21 +135,16 @@ const SPEED_OPTIONS = [1, 1.25, 1.5, 1.75, 2];
 const QUALITY_OPTIONS: QualityPreference[] = ['auto', '360', '480', '720', '1080'];
 const WEB_HOSTS = new Set([
   'lms.miva.university',
-  'support.miva.university',
   'sis.miva.university',
   'cas.miva.university',
   'miva.university',
   'miva.edu.ng',
 ]);
 
-const GOOGLE_AUTH_HOSTS = new Set([
-  'accounts.google.com',
-  'accounts.youtube.com',
-]);
 
 const MAIN_DRAWER_ITEMS: DrawerItem[] = [
   {
-    label: 'Courses',
+    label: 'Home',
     url: LMS_HOME_URL,
     Icon: BookOpen,
   },
@@ -144,7 +160,7 @@ const MAIN_DRAWER_ITEMS: DrawerItem[] = [
   },
   {
     label: 'Support',
-    url: SUPPORT_URL,
+    externalUrl: SUPPORT_URL,
     Icon: Headphones,
   },
   {
@@ -174,35 +190,41 @@ Notifications.setNotificationHandler({
 });
 
 const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwake: boolean) => `
+${buildPageBridgeScript()}
 (function () {
   var preference = ${JSON.stringify(preferences)};
   var keepScreenAwake = ${JSON.stringify(keepScreenAwake)};
+
+  if (window.MivaUnofficial && window.MivaUnofficial.setVideoPreferences) {
+    window.MivaUnofficial.setVideoPreferences(preference);
+    if (window.MivaUnofficial.setKeepScreenAwake) {
+      window.MivaUnofficial.setKeepScreenAwake(keepScreenAwake);
+    }
+    true;
+    return;
+  }
+
   var pageWakeLockSentinel = null;
   var STYLE_ID = 'miv-unofficial-cleanup-style';
   var VIMEO_SCRIPT_SRC = 'https://player.vimeo.com/api/player.js';
-  var VENDOR_CHAT_SELECTORS = [
-    '[class*="intercom" i]',
-    '[id*="intercom" i]',
-    '[class*="crisp" i]',
-    '[id*="crisp" i]',
-    '[class*="tawk" i]',
-    '[id*="tawk" i]',
-    'iframe[src*="chat"]',
-    'iframe[src*="intercom"]',
-    'iframe[src*="crisp"]',
-    'iframe[src*="tawk"]'
+  var CHAT_WIDGET_SELECTORS = [
+    '#zs_fl_logo',
+    '#zs-fl-tip',
+    '#zs-tip-close',
+    '#zsiq_chat_wrap',
+    '.zsiq-float-tooltip',
+    '.zs-fl-logo',
+    '.chat-iframe-wrap',
+    '.seasonal-cw-bg'
   ];
-  var FLOATING_CHAT_SELECTORS = [
-    '[id*="chat" i]',
-    '[class*="chat" i]',
-    '[aria-label*="chat" i]',
-    '[title*="chat" i]',
-    'button[aria-label*="help" i]',
-    'button[title*="help" i]'
-  ];
+  var PULL_REFRESH_DISTANCE = 92;
   var vimeoScriptLoading = false;
   var vimeoScriptCallbacks = [];
   var lastMediaInteractionAt = 0;
+  var pullStartX = null;
+  var pullStartY = null;
+  var pullRefreshArmed = false;
+  var lastPullRefreshAt = 0;
 
   function postMessage(payload) {
     try {
@@ -267,113 +289,91 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
     }
   }
 
-  function hideAnnoyances() {
-    if (!document.getElementById(STYLE_ID)) {
-      var style = document.createElement('style');
-      style.id = STYLE_ID;
-      style.textContent = VENDOR_CHAT_SELECTORS.join(',') + '{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;} body{padding-bottom:0!important;}';
-      document.head && document.head.appendChild(style);
-    }
-
-    VENDOR_CHAT_SELECTORS.forEach(function (selector) {
-      try {
-        Array.prototype.forEach.call(document.querySelectorAll(selector), function (node) {
-          node.style.setProperty('display', 'none', 'important');
-          node.style.setProperty('visibility', 'hidden', 'important');
-          node.style.setProperty('pointer-events', 'none', 'important');
-        });
-      } catch (error) {}
-    });
-
-    FLOATING_CHAT_SELECTORS.forEach(function (selector) {
-      try {
-        Array.prototype.forEach.call(document.querySelectorAll(selector), function (node) {
-          var rect = node.getBoundingClientRect && node.getBoundingClientRect();
-          var computedStyle = window.getComputedStyle && window.getComputedStyle(node);
-          var isFloating = computedStyle && (computedStyle.position === 'fixed' || computedStyle.position === 'sticky');
-          var isBottomCorner = rect && rect.width <= 420 && rect.height <= 520 && rect.left > window.innerWidth * 0.42 && rect.top > window.innerHeight * 0.35;
-
-          if (isFloating && isBottomCorner) {
-            node.style.setProperty('display', 'none', 'important');
-            node.style.setProperty('visibility', 'hidden', 'important');
-            node.style.setProperty('pointer-events', 'none', 'important');
-          }
-        });
-      } catch (error) {}
-    });
+  function hideChatWidget() {
+    if (document.getElementById(STYLE_ID)) return;
+    var parent = document.head || document.documentElement;
+    if (!parent) return;
+    var style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = CHAT_WIDGET_SELECTORS.join(',') + '{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}';
+    parent.appendChild(style);
   }
 
-  function enhanceLoginAutofill() {
+  function getPageScrollTop() {
+    return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+  }
+
+  function isEditableTarget(target) {
     try {
-      var passwordInputs = document.querySelectorAll('input[type="password"]');
-      Array.prototype.forEach.call(passwordInputs, function (passwordInput) {
-        if (!passwordInput.getAttribute('autocomplete')) {
-          passwordInput.setAttribute('autocomplete', 'current-password');
-        }
-        if (!passwordInput.getAttribute('name')) {
-          passwordInput.setAttribute('name', 'password');
-        }
-
-        var form = passwordInput.closest && passwordInput.closest('form');
-        var candidates = form ? form.querySelectorAll('input') : document.querySelectorAll('input');
-        var usernameInput;
-        for (var index = 0; index < candidates.length; index += 1) {
-          var input = candidates[index];
-          var type = String(input.getAttribute('type') || 'text').toLowerCase();
-          if (input === passwordInput || type === 'password' || type === 'hidden' || input.disabled || input.readOnly) {
-            continue;
-          }
-          usernameInput = input;
-          if (type === 'email' || /user|email|login|matric|student/i.test(input.name || input.id || input.placeholder || '')) {
-            break;
-          }
-        }
-
-        if (usernameInput) {
-          if (!usernameInput.getAttribute('autocomplete')) {
-            usernameInput.setAttribute('autocomplete', 'username');
-          }
-          if (!usernameInput.getAttribute('name')) {
-            usernameInput.setAttribute('name', 'username');
-          }
-        }
-      });
-
-      Array.prototype.forEach.call(document.querySelectorAll('a[target="_blank"], form[target="_blank"]'), function (node) {
-        var targetUrl = String(node.href || node.action || '');
-        if (targetUrl.indexOf('accounts.google.com') >= 0) {
-          node.removeAttribute('target');
-        }
-      });
-    } catch (error) {}
+      return !!(target && target.closest && target.closest('input, textarea, select, [contenteditable="true"]'));
+    } catch (error) {
+      return false;
+    }
   }
+
+  function resetPullRefresh() {
+    pullStartX = null;
+    pullStartY = null;
+    pullRefreshArmed = false;
+  }
+
+  function installPullToRefreshBridge() {
+    if (window.__mivUnofficialPullToRefreshInstalled) {
+      return;
+    }
+    window.__mivUnofficialPullToRefreshInstalled = true;
+
+    document.addEventListener('touchstart', function (event) {
+      try {
+        if (!event.touches || event.touches.length !== 1 || getPageScrollTop() > 2 || isEditableTarget(event.target)) {
+          resetPullRefresh();
+          return;
+        }
+
+        pullStartX = event.touches[0].clientX;
+        pullStartY = event.touches[0].clientY;
+        pullRefreshArmed = true;
+      } catch (error) {
+        resetPullRefresh();
+      }
+    }, { passive: true, capture: true });
+
+    document.addEventListener('touchmove', function (event) {
+      try {
+        if (!pullRefreshArmed || !event.touches || event.touches.length !== 1 || pullStartY === null || pullStartX === null) {
+          return;
+        }
+
+        if (getPageScrollTop() > 2) {
+          resetPullRefresh();
+          return;
+        }
+
+        var deltaY = event.touches[0].clientY - pullStartY;
+        var deltaX = Math.abs(event.touches[0].clientX - pullStartX);
+        var isMostlyVertical = deltaY > 0 && deltaX < deltaY * 0.55;
+        var canRefresh = Date.now() - lastPullRefreshAt > 2500;
+
+        if (isMostlyVertical && deltaY >= PULL_REFRESH_DISTANCE && canRefresh) {
+          lastPullRefreshAt = Date.now();
+          resetPullRefresh();
+          postMessage({ type: 'pull-refresh' });
+        }
+      } catch (error) {
+        resetPullRefresh();
+      }
+    }, { passive: true, capture: true });
+
+    document.addEventListener('touchend', resetPullRefresh, { passive: true, capture: true });
+    document.addEventListener('touchcancel', resetPullRefresh, { passive: true, capture: true });
+  }
+
+
   function normaliseQuality(value) {
     var text = String(value || '').toLowerCase();
+    if (text === 'auto') return 'auto';
     var match = text.match(/(360|480|720|1080)p?/);
     return match ? match[1] : undefined;
-  }
-
-  function detectQualityFromPage() {
-    var selectors = [
-      '[aria-checked="true"]',
-      '[aria-selected="true"]',
-      '.active',
-      '.selected',
-      '.vjs-selected',
-      '.plyr__menu__container button[aria-checked="true"]'
-    ];
-    for (var index = 0; index < selectors.length; index += 1) {
-      try {
-        var nodes = document.querySelectorAll(selectors[index]);
-        for (var nodeIndex = 0; nodeIndex < nodes.length; nodeIndex += 1) {
-          var detected = normaliseQuality(nodes[nodeIndex].textContent || nodes[nodeIndex].getAttribute('aria-label'));
-          if (detected) {
-            return detected;
-          }
-        }
-      } catch (error) {}
-    }
-    return undefined;
   }
 
   function reportHtmlVideoPreferences(video) {
@@ -382,7 +382,7 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
       type: 'video-preferences-detected',
       source: 'html5',
       speed: Number.isFinite(speed) ? speed : undefined,
-      quality: detectQualityFromPage(),
+      quality: undefined,
       userInitiated: Date.now() - lastMediaInteractionAt < 6000
     });
   }
@@ -405,47 +405,13 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
     reportHtmlVideoPreferences(video);
   }
 
-  function chooseSelectOption(select) {
-    if (!select || preference.quality === 'auto') {
-      return false;
-    }
-
-    var changed = false;
-    Array.prototype.forEach.call(select.options || [], function (option) {
-      var value = String(option.value || '') + ' ' + String(option.textContent || '');
-      if (normaliseQuality(value) === preference.quality) {
-        select.value = option.value;
-        select.dispatchEvent(new Event('input', { bubbles: true }));
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-        changed = true;
-      }
-    });
-    return changed;
-  }
-
-  function chooseMenuOption() {
-    if (preference.quality === 'auto') {
-      return;
-    }
-
-    var target = preference.quality + 'p';
-    var candidates = document.querySelectorAll('button, [role="menuitem"], [role="option"], li, a');
-    Array.prototype.forEach.call(candidates, function (node) {
-      var text = String(node.textContent || node.getAttribute('aria-label') || '').toLowerCase();
-      if (text.indexOf(target) >= 0) {
-        try {
-          node.click();
-        } catch (error) {}
-      }
-    });
-  }
-
   function ensureVimeoApi(callback) {
     if (window.Vimeo && window.Vimeo.Player) {
       callback();
       return;
     }
 
+    if (!document.head) return;
     vimeoScriptCallbacks.push(callback);
     if (vimeoScriptLoading) {
       return;
@@ -516,7 +482,7 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
   function postVimeoCommand(iframe, method, value) {
     try {
       if (iframe && iframe.contentWindow) {
-        iframe.contentWindow.postMessage(JSON.stringify({ method: method, value: value }), '*');
+        iframe.contentWindow.postMessage(JSON.stringify({ method: method, value: value }), 'https://player.vimeo.com');
       }
     } catch (error) {}
   }
@@ -532,8 +498,10 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
     }
 
     var setRate = function (rate) {
+      if (target !== Number(preference.speed)) return;
       try {
         player.setPlaybackRate(rate).catch(function () {
+          if (target !== Number(preference.speed)) return;
           postVimeoCommand(iframe, 'setPlaybackRate', rate);
         });
       } catch (error) {
@@ -561,14 +529,16 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
   }
 
   function applyVimeoQuality(player, iframe) {
-    if (!player || !player.setQuality || preference.quality === 'auto') {
+    if (!player || !player.setQuality) {
       return;
     }
 
-    var target = preference.quality + 'p';
+    var target = preference.quality === 'auto' ? 'auto' : preference.quality + 'p';
     var setQuality = function (quality) {
+      if (target !== (preference.quality === 'auto' ? 'auto' : preference.quality + 'p')) return;
       try {
         player.setQuality(quality).catch(function () {
+          if (target !== (preference.quality === 'auto' ? 'auto' : preference.quality + 'p')) return;
           postVimeoCommand(iframe, 'setQuality', quality);
         });
       } catch (error) {
@@ -600,13 +570,14 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
     if (Number.isFinite(target) && target > 0) {
       postVimeoCommand(iframe, 'setPlaybackRate', target);
     }
-    if (preference.quality !== 'auto') {
-      postVimeoCommand(iframe, 'setQuality', preference.quality + 'p');
-    }
+    postVimeoCommand(iframe, 'setQuality', preference.quality === 'auto' ? 'auto' : preference.quality + 'p');
   }
 
   function applyVimeoPreferences(player, iframe) {
-    applyRawVimeoPreferences(iframe);
+    var signature = preference.speed + ':' + preference.quality;
+    if (iframe.mivAppliedPreference === signature) return;
+    iframe.mivAppliedPreference = signature;
+    iframe.mivApplyingUntil = Date.now() + 1800;
     applyVimeoSpeed(player, iframe);
     applyVimeoQuality(player, iframe);
   }
@@ -617,11 +588,15 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
     }
 
     var src = String(iframe.src || iframe.getAttribute('src') || '');
-    if (src.indexOf('player.vimeo.com') < 0 && src.indexOf('vimeo.com/video') < 0) {
-      return;
-    }
+    try { if (new URL(src, location.href).hostname !== 'player.vimeo.com') return; }
+    catch (error) { return; }
 
     iframe.dataset.mivaUnofficialVimeoBound = 'true';
+    iframe.addEventListener('load', function () {
+      iframe.mivAppliedPreference = null;
+      iframe.mivRawPreference = null;
+      scheduleEnhancement();
+    });
     var existingAllow = String(iframe.getAttribute('allow') || '');
     ['autoplay', 'fullscreen', 'picture-in-picture', 'encrypted-media'].forEach(function (permission) {
       if (existingAllow.indexOf(permission) < 0) {
@@ -648,7 +623,7 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
             type: 'video-preferences-detected',
             source: 'vimeo',
             speed: data && Number(data.playbackRate),
-            userInitiated: true
+            userInitiated: Date.now() > (iframe.mivApplyingUntil || 0)
           });
         });
         player.on('qualitychange', function (data) {
@@ -656,7 +631,7 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
             type: 'video-preferences-detected',
             source: 'vimeo',
             quality: normaliseQuality(data && (data.quality || data.id)),
-            userInitiated: true
+            userInitiated: Date.now() > (iframe.mivApplyingUntil || 0)
           });
         });
       } catch (error) {}
@@ -664,7 +639,7 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
   }
 
   function applyVideoPreferences() {
-    hideAnnoyances();
+    hideChatWidget();
 
     Array.prototype.forEach.call(document.querySelectorAll('video'), function (video) {
       bindHtmlVideo(video);
@@ -674,21 +649,16 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
       }
     });
 
-    Array.prototype.forEach.call(document.querySelectorAll('select'), function (select) {
-      var label = String(select.name || select.id || select.getAttribute('aria-label') || '').toLowerCase();
-      if (label.indexOf('quality') >= 0 || label.indexOf('resolution') >= 0) {
-        chooseSelectOption(select);
-      }
-    });
-
-    chooseMenuOption();
-
     Array.prototype.forEach.call(document.querySelectorAll('iframe'), function (iframe) {
       bindVimeoIframe(iframe);
       if (iframe.mivaUnofficialVimeoPlayer) {
         applyVimeoPreferences(iframe.mivaUnofficialVimeoPlayer, iframe);
       } else if (iframe.dataset && iframe.dataset.mivaUnofficialVimeoBound === 'true') {
-        applyRawVimeoPreferences(iframe);
+        var signature = preference.speed + ':' + preference.quality;
+        if (iframe.mivRawPreference !== signature) {
+          iframe.mivRawPreference = signature;
+          applyRawVimeoPreferences(iframe);
+        }
       }
     });
   }
@@ -706,27 +676,39 @@ const buildWebEnhancementScript = (preferences: VideoPreferences, keepScreenAwak
     } catch (error) {}
   }, true);
 
+  var enhancementScheduled = false;
+  function scheduleEnhancement() {
+    if (enhancementScheduled || document.hidden) return;
+    enhancementScheduled = true;
+    setTimeout(function () {
+      enhancementScheduled = false;
+      applyVideoPreferences();
+    }, 100);
+  }
+
   window.MivaUnofficial = {
     setVideoPreferences: function (nextPreference) {
       preference = Object.assign({}, preference, nextPreference || {});
       applyVideoPreferences();
-      setTimeout(applyVideoPreferences, 800);
     },
     setKeepScreenAwake: setKeepScreenAwake
   };
 
   installWakeLockGuard();
+  installPullToRefreshBridge();
   setKeepScreenAwake(keepScreenAwake);
   applyVideoPreferences();
   setTimeout(applyVideoPreferences, 800);
-  setInterval(applyVideoPreferences, 2500);
-
-  try {
-    new MutationObserver(applyVideoPreferences).observe(document.documentElement, {
-      childList: true,
-      subtree: true
-    });
-  } catch (error) {}
+  var enhancementObserver;
+  function observeEnhancements() {
+    if (enhancementObserver || !document.documentElement) return;
+    enhancementObserver = new MutationObserver(scheduleEnhancement);
+    enhancementObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+    applyVideoPreferences();
+  }
+  observeEnhancements();
+  document.addEventListener('DOMContentLoaded', observeEnhancements, { once: true });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) scheduleEnhancement(); });
 
   postMessage({ type: 'web-layer-ready' });
 })();
@@ -767,7 +749,7 @@ const isAllowedWebUrl = (url: string) => {
   try {
     const parsedUrl = new URL(url);
     const hostname = parsedUrl.hostname.toLowerCase();
-    return parsedUrl.protocol === 'https:' && (WEB_HOSTS.has(hostname) || GOOGLE_AUTH_HOSTS.has(hostname));
+    return parsedUrl.protocol === 'https:' && WEB_HOSTS.has(hostname);
   } catch (error) {
     return false;
   }
@@ -911,16 +893,12 @@ const ensureNotificationPermission = async () => {
 };
 
 const scheduleLearningReminder = async (settings: ReminderSettings) => {
-  if (settings.notificationId) {
-    await Notifications.cancelScheduledNotificationAsync(settings.notificationId);
-  }
-
   const hasPermission = await ensureNotificationPermission();
   if (!hasPermission) {
     throw new Error('Notifications are disabled for this app.');
   }
 
-  return Notifications.scheduleNotificationAsync({
+  const notificationId = await Notifications.scheduleNotificationAsync({
     content: {
       title: 'Time to learn',
       body: 'Open Miva LMS and keep your learning streak alive.',
@@ -936,6 +914,15 @@ const scheduleLearningReminder = async (settings: ReminderSettings) => {
       minute: settings.minute,
     },
   });
+  if (settings.notificationId) {
+    try {
+      await Notifications.cancelScheduledNotificationAsync(settings.notificationId);
+    } catch (error) {
+      await Notifications.cancelScheduledNotificationAsync(notificationId).catch(() => {});
+      throw error;
+    }
+  }
+  return notificationId;
 };
 
 export default function App() {
@@ -943,27 +930,137 @@ export default function App() {
   const lastUrlWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastPersistedUrlRef = useRef<string | null>(null);
   const [sourceUri, setSourceUri] = useState(LMS_HOME_URL);
+  const [currentUrl, setCurrentUrl] = useState(LMS_HOME_URL);
+  const currentUrlRef = useRef(LMS_HOME_URL);
+  const loadingState = useRef(new LoadingState()).current;
+  const secureLoginRequest = useRef(0);
+  const browserOpeningRef = useRef(false);
+  const resumeSessionRef = useRef(true);
+  const awakeQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
-  const [loadProgress, setLoadProgress] = useState(0);
+  const [loadProgress, setLoadProgress] = useState(0.04);
+  const [pipActive, setPipActive] = useState(false);
+  const [secureLoginOpen, setSecureLoginOpen] = useState(false);
+  const [secureLoginAutoFill, setSecureLoginAutoFill] = useState(true);
+  const progressAnimation = useRef(new Animated.Value(0.04)).current;
+  const loadFinishTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastBrowserPdfRef = useRef({ url: '', at: 0 });
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [miscOpen, setMiscOpen] = useState(false);
   const [timePickerOpen, setTimePickerOpen] = useState(false);
   const [videoPreferences, setVideoPreferences] = useState<VideoPreferences>(DEFAULT_VIDEO_PREFS);
+  const videoPreferencesRef = useRef(DEFAULT_VIDEO_PREFS);
   const [keepAwakeEnabled, setKeepAwakeEnabled] = useState(false);
+  const [resumePreviousSession, setResumePreviousSession] = useState(true);
   const [reminder, setReminder] = useState<ReminderSettings>(DEFAULT_REMINDER);
+  const reminderRef = useRef(DEFAULT_REMINDER);
+  const reminderQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const injectedScript = useMemo(
     () => buildWebEnhancementScript(videoPreferences, keepAwakeEnabled),
     [keepAwakeEnabled, videoPreferences]
   );
 
+  const beginNavigation = useCallback((url = currentUrlRef.current, force = false) => {
+    const previous = loadingState.revision;
+    loadingState.begin(url, force);
+    if (loadFinishTimer.current) clearTimeout(loadFinishTimer.current);
+    loadFinishTimer.current = null;
+    if (previous !== loadingState.revision) {
+      progressAnimation.stopAnimation();
+      progressAnimation.setValue(0.04);
+    }
+    setLoadProgress(loadingState.progress);
+    setIsLoading(true);
+  }, [loadingState, progressAnimation]);
+
+  const finishNavigation = useCallback((url = currentUrlRef.current) => {
+    const revision = loadingState.complete(url);
+    if (revision === null) return;
+    if (loadFinishTimer.current) clearTimeout(loadFinishTimer.current);
+    setLoadProgress(1);
+    setIsRefreshing(false);
+    loadFinishTimer.current = setTimeout(() => {
+      loadFinishTimer.current = null;
+      if (loadingState.hide(revision)) setIsLoading(false);
+    }, 200);
+  }, [loadingState]);
+
+  const openPdfInBrowser = useCallback(async (url: string) => {
+    const browserUrl = browserDocumentUrl(url);
+    if (!browserUrl || browserOpeningRef.current) return;
+    const previous = lastBrowserPdfRef.current;
+    if (previous.url === browserUrl && Date.now() - previous.at < 1500) return;
+    lastBrowserPdfRef.current = { url: browserUrl, at: Date.now() };
+    browserOpeningRef.current = true;
+    try {
+      await WebBrowser.openBrowserAsync(browserUrl);
+    } catch {
+      Alert.alert('Browser unavailable', 'Install or enable a web browser to open this document.');
+    } finally {
+      browserOpeningRef.current = false;
+    }
+  }, []);
+
+  const closeSecureLogin = useCallback(() => {
+    secureLoginRequest.current += 1;
+    setSecureLoginOpen(false);
+    void device?.setBlocked(false);
+  }, []);
+
+  const openSecureLogin = useCallback(async (autoFill: boolean) => {
+    const request = ++secureLoginRequest.current;
+    await device?.setBlocked(true);
+    if (request !== secureLoginRequest.current) return;
+    if (AppState.currentState !== 'active') {
+      void device?.setBlocked(false);
+      return;
+    }
+    setDrawerOpen(false);
+    setSecureLoginAutoFill(autoFill);
+    setSecureLoginOpen(true);
+  }, []);
+
+  const fillLogin = useCallback((details: LoginDetails) => {
+    closeSecureLogin();
+    webViewRef.current?.injectJavaScript(buildLoginFillScript(details));
+  }, [closeSecureLogin]);
+
+  useEffect(() => {
+    Animated.timing(progressAnimation, {
+      toValue: loadProgress,
+      duration: loadProgress === 1 ? 160 : 220,
+      useNativeDriver: false,
+    }).start();
+  }, [loadProgress, progressAnimation]);
+
+  useEffect(() => {
+    const pipListener = device?.addListener('pipChanged', ({ active }) => {
+      setPipActive(active);
+      if (active) {
+        setDrawerOpen(false); setSettingsOpen(false); setMiscOpen(false); setTimePickerOpen(false);
+      }
+    });
+    const downloadListener = device?.addListener('download', ({ url }) => {
+      finishNavigation(url);
+      void openPdfInBrowser(url);
+    });
+    return () => {
+      pipListener?.remove();
+      downloadListener?.remove();
+      void device?.setVideoPlaying(false);
+      if (loadFinishTimer.current) clearTimeout(loadFinishTimer.current);
+    };
+  }, [finishNavigation, openPdfInBrowser]);
+
   const persistLastUrl = useCallback((url: string) => {
     const supportedUrl = parseIncomingUrl(url);
-    if (!supportedUrl || supportedUrl === lastPersistedUrlRef.current) {
+    if (!resumeSessionRef.current || !supportedUrl || isPdfUrl(supportedUrl) || supportedUrl === lastPersistedUrlRef.current) {
       return;
     }
 
@@ -973,104 +1070,81 @@ export default function App() {
     }
 
     lastUrlWriteTimerRef.current = setTimeout(() => {
-      void AsyncStorage.setItem(LAST_URL_KEY, supportedUrl);
+      void AsyncStorage.setItem(LAST_URL_KEY, supportedUrl).catch(() => {});
     }, 350);
   }, []);
 
   const navigateInApp = useCallback(
     (url: string) => {
-      setSourceUri(url);
-      persistLastUrl(url);
       setDrawerOpen(false);
+      if (isPdfUrl(url)) { void openPdfInBrowser(url); return; }
+      beginNavigation(url, true);
+      if (url === currentUrlRef.current) webViewRef.current?.reload();
+      else if (url === sourceUri) webViewRef.current?.injectJavaScript(`window.location.assign(${JSON.stringify(url)}); true;`);
+      else setSourceUri(url);
+      currentUrlRef.current = url;
+      setCurrentUrl(url);
+      persistLastUrl(url);
     },
-    [persistLastUrl]
+    [beginNavigation, openPdfInBrowser, persistLastUrl, sourceUri]
   );
 
   const openExternal = useCallback((url: string) => {
-    void Linking.openURL(url);
+    void Linking.openURL(url).catch(() => Alert.alert('Unable to open link', 'No installed app could open this link.'));
   }, []);
 
   const updateKeepAwakePreference = useCallback((enabled: boolean) => {
     setKeepAwakeEnabled(enabled);
-    webViewRef.current?.injectJavaScript(buildKeepAwakeUpdateScript(enabled));
+  }, []);
 
-    if (enabled) {
-      void KeepAwake.activateKeepAwakeAsync(KEEP_AWAKE_TAG);
-    } else {
-      void releaseKeepAwakeLocks();
+  const updateResumePreviousSession = useCallback((enabled: boolean) => {
+    resumeSessionRef.current = enabled;
+    setResumePreviousSession(enabled);
+    void AsyncStorage.setItem(RESUME_SESSION_KEY, String(enabled)).catch(() => {});
+    if (!enabled) {
+      if (lastUrlWriteTimerRef.current) clearTimeout(lastUrlWriteTimerRef.current);
+      lastPersistedUrlRef.current = LMS_HOME_URL;
+      void AsyncStorage.setItem(LAST_URL_KEY, LMS_HOME_URL).catch(() => {});
     }
-
-    void AsyncStorage.setItem(KEEP_AWAKE_KEY, String(enabled));
   }, []);
 
   const persistVideoPreferences = useCallback(async (nextPreferences: VideoPreferences) => {
+    videoPreferencesRef.current = nextPreferences;
     setVideoPreferences(nextPreferences);
     webViewRef.current?.injectJavaScript(buildPreferenceUpdateScript(nextPreferences));
     await AsyncStorage.setItem(VIDEO_PREF_KEY, JSON.stringify(nextPreferences));
   }, []);
 
   const persistReminder = useCallback(async (nextReminder: ReminderSettings) => {
+    reminderRef.current = nextReminder;
     setReminder(nextReminder);
     await AsyncStorage.setItem(REMINDER_KEY, JSON.stringify(nextReminder));
   }, []);
 
-  const toggleReminder = useCallback(
-    async (enabled: boolean) => {
-      if (!enabled) {
-        if (reminder.notificationId) {
-          await Notifications.cancelScheduledNotificationAsync(reminder.notificationId);
-        }
-        await persistReminder({
-          ...reminder,
-          enabled: false,
-          notificationId: null,
-        });
-        return;
+  const updateReminder = useCallback((changes: Partial<Pick<ReminderSettings, 'enabled' | 'hour' | 'minute'>>, errorTitle: string) => {
+    const task = reminderQueueRef.current.then(async () => {
+      const next = { ...reminderRef.current, ...changes };
+      if (next.enabled) next.notificationId = await scheduleLearningReminder(next);
+      else {
+        if (next.notificationId) await Notifications.cancelScheduledNotificationAsync(next.notificationId);
+        next.notificationId = null;
       }
+      await persistReminder(next);
+    });
+    reminderQueueRef.current = task.catch((error) => {
+      Alert.alert(errorTitle, error instanceof Error ? error.message : 'Notifications are unavailable.');
+    });
+    return reminderQueueRef.current;
+  }, [persistReminder]);
 
-      try {
-        const notificationId = await scheduleLearningReminder({
-          ...reminder,
-          enabled: true,
-        });
-        await persistReminder({
-          ...reminder,
-          enabled: true,
-          notificationId,
-        });
-      } catch (error) {
-        Alert.alert('Reminder not enabled', error instanceof Error ? error.message : 'Notifications are unavailable.');
-      }
-    },
-    [persistReminder, reminder]
-  );
+  const toggleReminder = useCallback((enabled: boolean) => updateReminder({ enabled }, 'Reminder not updated'), [updateReminder]);
 
   const setReminderTime = useCallback(
-    async (hour: number, minute: number) => {
-      const nextReminder = {
-        ...reminder,
-        hour,
-        minute,
-      };
+    (hour: number, minute: number) => {
       setTimePickerOpen(false);
-
-      if (nextReminder.enabled) {
-        try {
-          const notificationId = await scheduleLearningReminder(nextReminder);
-          await persistReminder({
-            ...nextReminder,
-            notificationId,
-          });
-          return;
-        } catch (error) {
-          Alert.alert('Reminder not updated', error instanceof Error ? error.message : 'Notifications are unavailable.');
-          return;
-        }
-      }
-
-      await persistReminder(nextReminder);
+      return updateReminder({ hour, minute }, 'Reminder not updated');
     },
-    [persistReminder, reminder]
+    [updateReminder]
   );
 
   const sendTestNotification = useCallback(async () => {
@@ -1103,40 +1177,60 @@ export default function App() {
     void releaseKeepAwakeLocks();
 
     return () => {
-      void releaseKeepAwakeLocks();
+      void awakeQueueRef.current.then(releaseKeepAwakeLocks).catch(() => {});
     };
   }, []);
 
   useEffect(() => {
     const hydrate = async () => {
       try {
-        const [storedVideoPreferences, storedKeepAwake, storedReminder, storedLastUrl, initialUrl] = await Promise.all([
+        const [
+          storedVideoPreferences,
+          storedKeepAwake,
+          storedResumePreviousSession,
+          storedReminder,
+          storedLastUrl,
+          initialUrl,
+        ] = await Promise.all([
           AsyncStorage.getItem(VIDEO_PREF_KEY),
           AsyncStorage.getItem(KEEP_AWAKE_KEY),
+          AsyncStorage.getItem(RESUME_SESSION_KEY),
           AsyncStorage.getItem(REMINDER_KEY),
           AsyncStorage.getItem(LAST_URL_KEY),
           Linking.getInitialURL(),
         ]);
 
+        const shouldResumePreviousSession = storedResumePreviousSession !== 'false';
+        setResumePreviousSession(shouldResumePreviousSession);
+        resumeSessionRef.current = shouldResumePreviousSession;
+
         const initialSupportedUrl = initialUrl ? parseIncomingUrl(initialUrl) : null;
         const storedSupportedUrl = storedLastUrl ? parseIncomingUrl(storedLastUrl) : null;
-        const resumeUrl = initialSupportedUrl || storedSupportedUrl || LMS_HOME_URL;
+        const resumeUrl = initialSupportedUrl || (shouldResumePreviousSession ? storedSupportedUrl : null) || LMS_HOME_URL;
         lastPersistedUrlRef.current = storedSupportedUrl;
-        setSourceUri(resumeUrl);
+        if (isPdfUrl(resumeUrl)) {
+          void openPdfInBrowser(resumeUrl);
+          lastPersistedUrlRef.current = LMS_HOME_URL;
+          void AsyncStorage.setItem(LAST_URL_KEY, LMS_HOME_URL).catch(() => {});
+          setSourceUri(LMS_HOME_URL);
+        } else if (currentUrlRef.current === LMS_HOME_URL) {
+          setSourceUri(resumeUrl);
+          currentUrlRef.current = resumeUrl;
+          setCurrentUrl(resumeUrl);
+        }
 
-        if (initialSupportedUrl && initialSupportedUrl !== storedSupportedUrl) {
+        if (initialSupportedUrl && !isPdfUrl(initialSupportedUrl) && initialSupportedUrl !== storedSupportedUrl) {
           lastPersistedUrlRef.current = initialSupportedUrl;
-          void AsyncStorage.setItem(LAST_URL_KEY, initialSupportedUrl);
+          void AsyncStorage.setItem(LAST_URL_KEY, initialSupportedUrl).catch(() => {});
         }
 
         if (storedVideoPreferences) {
           try {
             const parsed = JSON.parse(storedVideoPreferences) as Partial<VideoPreferences>;
             if (isFiniteSpeed(parsed.speed) && isQualityPreference(parsed.quality)) {
-              setVideoPreferences({
-                speed: parsed.speed,
-                quality: parsed.quality,
-              });
+              const stored = { speed: parsed.speed, quality: parsed.quality };
+              videoPreferencesRef.current = stored;
+              setVideoPreferences(stored);
             }
           } catch (error) {}
         }
@@ -1157,51 +1251,54 @@ export default function App() {
               parsed.minute >= 0 &&
               parsed.minute <= 59
             ) {
-              setReminder({
+              const restoredReminder = {
                 enabled: parsed.enabled,
                 hour: parsed.hour,
                 minute: parsed.minute,
                 notificationId: typeof parsed.notificationId === 'string' ? parsed.notificationId : null,
-              });
+              };
+              reminderRef.current = restoredReminder;
+              setReminder(restoredReminder);
             }
           } catch (error) {}
         }
+      } catch {
+        // Storage/link failures must not prevent the LMS from opening.
       } finally {
         setIsHydrated(true);
       }
     };
 
     void hydrate();
-  }, []);
+  }, [openPdfInBrowser]);
 
   useEffect(() => {
     if (!isHydrated) {
       return undefined;
     }
 
-    let cancelled = false;
-
-    const syncKeepAwake = async () => {
-      if (keepAwakeEnabled) {
-        await KeepAwake.activateKeepAwakeAsync(KEEP_AWAKE_TAG);
-      } else {
-        await releaseKeepAwakeLocks();
-      }
-
+    const next = awakeQueueRef.current.catch(() => {}).then(async () => {
+      if (keepAwakeEnabled) await KeepAwake.activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+      else await releaseKeepAwakeLocks();
       webViewRef.current?.injectJavaScript(buildKeepAwakeUpdateScript(keepAwakeEnabled));
+      await AsyncStorage.setItem(KEEP_AWAKE_KEY, String(keepAwakeEnabled));
+    });
+    awakeQueueRef.current = next.catch(() => {});
+  }, [isHydrated, keepAwakeEnabled]);
 
-      if (!cancelled) {
-        await AsyncStorage.setItem(KEEP_AWAKE_KEY, String(keepAwakeEnabled));
+  useEffect(() => {
+    const flushPage = () => {
+      const url = currentUrlRef.current;
+      if (lastUrlWriteTimerRef.current) clearTimeout(lastUrlWriteTimerRef.current);
+      if (resumeSessionRef.current && isAllowedWebUrl(url) && !isPdfUrl(url)) {
+        void AsyncStorage.setItem(LAST_URL_KEY, url).catch(() => {});
       }
     };
-
-    void syncKeepAwake();
-
-    return () => {
-      cancelled = true;
-      void releaseKeepAwakeLocks();
-    };
-  }, [isHydrated, keepAwakeEnabled]);
+    const listener = AppState.addEventListener('change', (state) => {
+      if (state === 'background') { closeSecureLogin(); flushPage(); }
+    });
+    return () => { listener.remove(); flushPage(); };
+  }, [closeSecureLogin]);
 
   useEffect(() => {
     const openSupportedUrl = (url: string | null | undefined) => {
@@ -1211,8 +1308,7 @@ export default function App() {
 
       const supportedUrl = parseIncomingUrl(url);
       if (supportedUrl) {
-        setSourceUri(supportedUrl);
-        persistLastUrl(supportedUrl);
+        navigateInApp(supportedUrl);
       }
     };
 
@@ -1229,7 +1325,7 @@ export default function App() {
       urlSubscription.remove();
       notificationSubscription.remove();
     };
-  }, [persistLastUrl]);
+  }, [navigateInApp]);
 
   useEffect(() => {
     return () => {
@@ -1250,6 +1346,8 @@ export default function App() {
         return true;
       }
 
+      if (secureLoginOpen) { closeSecureLogin(); return true; }
+
       if (timePickerOpen) {
         setTimePickerOpen(false);
         return true;
@@ -1266,6 +1364,7 @@ export default function App() {
       }
 
       if (canGoBack) {
+        beginNavigation();
         webViewRef.current?.goBack();
         return true;
       }
@@ -1274,7 +1373,7 @@ export default function App() {
     });
 
     return () => subscription.remove();
-  }, [canGoBack, drawerOpen, miscOpen, settingsOpen, timePickerOpen]);
+  }, [beginNavigation, canGoBack, closeSecureLogin, drawerOpen, miscOpen, secureLoginOpen, settingsOpen, timePickerOpen]);
 
   const onNavigationStateChange = useCallback(
     (navigationState: WebViewNavigation) => {
@@ -1282,94 +1381,124 @@ export default function App() {
       setCanGoForward(navigationState.canGoForward);
 
       const supportedUrl = parseIncomingUrl(navigationState.url);
-      if (supportedUrl) {
-        setSourceUri((currentUrl) => (currentUrl === supportedUrl ? currentUrl : supportedUrl));
+      if (supportedUrl && !isPdfUrl(supportedUrl)) {
+        if (loadingState.loading && loadingState.url && supportedUrl.split('#')[0] !== loadingState.url.split('#')[0]) return;
+        currentUrlRef.current = supportedUrl;
+        setCurrentUrl(supportedUrl);
         persistLastUrl(supportedUrl);
       }
     },
-    [persistLastUrl]
+    [loadingState, persistLastUrl]
   );
+
+  const refreshWebView = useCallback(() => {
+    if (!webViewRef.current) return;
+    playHaptic('medium');
+    beginNavigation(currentUrlRef.current, true);
+    setIsRefreshing(true);
+    webViewRef.current.reload();
+  }, [beginNavigation]);
+
+  const handleLoadStart = useCallback((event: { nativeEvent: { url: string } }) => {
+    beginNavigation(event.nativeEvent.url);
+    void device?.setVideoPlaying(false);
+    void device?.attach();
+  }, [beginNavigation]);
+
+  const handleLoadEnd = useCallback((event: { nativeEvent: { url: string } }) => {
+    finishNavigation(event.nativeEvent.url);
+    void device?.attach();
+  }, [finishNavigation]);
 
   const onMessage = useCallback((event: WebViewMessageEvent) => {
     try {
+      if (!isAllowedWebUrl(event.nativeEvent.url)) return;
       const message = JSON.parse(event.nativeEvent.data) as WebMessage;
 
+      if (message.type === 'pull-refresh') {
+        refreshWebView();
+        return;
+      }
+
+      if (message.type === 'open-pdf' && message.url) {
+        void openPdfInBrowser(message.url);
+        return;
+      }
+
+      if (message.type === 'video-state' && typeof message.playing === 'boolean') {
+        if (isAllowedWebUrl(event.nativeEvent.url)) void device?.setVideoPlaying(message.playing);
+        return;
+      }
+
+      if (message.type === 'navigation-start' && message.url) {
+        if (typeof message.url === 'string' && isAllowedWebUrl(message.url) && !isPdfUrl(message.url)) beginNavigation(message.url);
+        return;
+      }
+
+      if (message.type === 'login-filled') {
+        if (!message.ok) Alert.alert('Open the LMS login page', 'Secure Login fills the Miva LMS sign-in form. Open that page and try again.');
+        return;
+      }
+
       if (message.type === 'video-preferences-detected') {
-        setVideoPreferences((current) => {
-          const isCurrentDefault =
-            current.speed === DEFAULT_VIDEO_PREFS.speed && current.quality === DEFAULT_VIDEO_PREFS.quality;
-          const shouldAcceptWebPreference = message.userInitiated || isCurrentDefault;
-
-          if (!shouldAcceptWebPreference) {
-            return current;
-          }
-
-          const next = {
-            speed: isFiniteSpeed(message.speed) ? message.speed : current.speed,
-            quality: isQualityPreference(message.quality) ? message.quality : current.quality,
-          };
-
-          if (next.speed === current.speed && next.quality === current.quality) {
-            return current;
-          }
-
-          void AsyncStorage.setItem(VIDEO_PREF_KEY, JSON.stringify(next));
-          return next;
-        });
+        const current = videoPreferencesRef.current;
+        if (!message.userInitiated) return;
+        const next = {
+          speed: isFiniteSpeed(message.speed) ? message.speed : current.speed,
+          quality: isQualityPreference(message.quality) ? message.quality : current.quality,
+        };
+        if (next.speed !== current.speed || next.quality !== current.quality) {
+          void persistVideoPreferences(next).catch(() => {});
+        }
       }
     } catch (error) {}
-  }, []);
+  }, [beginNavigation, openPdfInBrowser, persistVideoPreferences, refreshWebView]);
 
   const setSpeed = useCallback(
     (speed: number) => {
-      void persistVideoPreferences({
-        ...videoPreferences,
-        speed,
-      });
+      void persistVideoPreferences({ ...videoPreferencesRef.current, speed }).catch(() => {});
     },
-    [persistVideoPreferences, videoPreferences]
+    [persistVideoPreferences]
   );
 
   const setQuality = useCallback(
     (quality: QualityPreference) => {
-      void persistVideoPreferences({
-        ...videoPreferences,
-        quality,
-      });
+      void persistVideoPreferences({ ...videoPreferencesRef.current, quality }).catch(() => {});
     },
-    [persistVideoPreferences, videoPreferences]
+    [persistVideoPreferences]
   );
 
   const openInBrowser = useCallback(() => {
-    void Linking.openURL(sourceUri);
-  }, [sourceUri]);
+    openExternal(currentUrlRef.current);
+  }, [openExternal]);
 
-  const onOpenWindow = useCallback((event: { nativeEvent: { targetUrl: string } }) => {
-    const targetUrl = event.nativeEvent.targetUrl;
+  const onOpenWindow = useCallback(
+    (event: { nativeEvent: { targetUrl: string } }) => {
+      const targetUrl = event.nativeEvent.targetUrl;
+      if (!targetUrl) return;
+      if (isPdfUrl(targetUrl)) { void openPdfInBrowser(targetUrl); return; }
+      if (isAllowedWebUrl(targetUrl)) { navigateInApp(targetUrl); return; }
+      openExternal(targetUrl);
+    },
+    [navigateInApp, openExternal, openPdfInBrowser]
+  );
 
-    if (isAllowedWebUrl(targetUrl)) {
-      setSourceUri(targetUrl);
-      return;
-    }
-
-    void Linking.openURL(targetUrl);
-  }, []);
-
-  const onShouldStartLoadWithRequest = useCallback((request: { url: string }) => {
-    const requestedUrl = request.url;
-
-    if (
-      requestedUrl.startsWith('about:') ||
-      requestedUrl.startsWith('data:') ||
-      requestedUrl.startsWith('blob:') ||
-      isAllowedWebUrl(requestedUrl)
-    ) {
-      return true;
-    }
-
-    void Linking.openURL(requestedUrl);
-    return false;
-  }, []);
+  const onShouldStartLoadWithRequest = useCallback(
+    (request: { url: string; isTopFrame?: boolean }) => {
+      const url = request.url;
+      if (isPdfUrl(url)) { void openPdfInBrowser(url); return false; }
+      if (/^(about:|data:|blob:)/.test(url)) return true;
+      if (request.isTopFrame === false && /^https?:/.test(url)) return true;
+      if (isAllowedWebUrl(url)) {
+        if (url.includes('#') && url.split('#')[0] === currentUrlRef.current.split('#')[0]) return true;
+        beginNavigation(url);
+        return true;
+      }
+      openExternal(url);
+      return false;
+    },
+    [beginNavigation, openExternal, openPdfInBrowser]
+  );
 
   const renderError = useCallback(
     () => (
@@ -1377,10 +1506,10 @@ export default function App() {
         <ShieldCheck color="#E3A325" size={32} strokeWidth={2.2} />
         <Text style={styles.errorTitle}>LMS did not load</Text>
         <Text style={styles.errorUrl} numberOfLines={2}>
-          {sourceUri}
+          {currentUrl}
         </Text>
         <View style={styles.errorActions}>
-          <HapticPressable style={styles.primaryButton} haptic="medium" onPress={() => webViewRef.current?.reload()}>
+          <HapticPressable style={styles.primaryButton} haptic="medium" onPress={refreshWebView}>
             <RefreshCcw color="#FFFFFF" size={18} strokeWidth={2.4} />
             <Text style={styles.primaryButtonText}>Retry</Text>
           </HapticPressable>
@@ -1390,15 +1519,15 @@ export default function App() {
         </View>
       </View>
     ),
-    [openInBrowser, sourceUri]
+    [currentUrl, openInBrowser, refreshWebView]
   );
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.appShell} edges={['top', 'right', 'bottom', 'left']}>
-      <StatusBar barStyle="light-content" backgroundColor="#151B17" />
+      <SafeAreaView style={styles.appShell} edges={pipActive ? [] : ['top', 'right', 'bottom', 'left']}>
+      <StatusBar hidden={pipActive} barStyle="light-content" backgroundColor="#151B17" />
 
-      <View style={styles.header}>
+      <View style={[styles.header, pipActive && { display: 'none' }]}>
         <View style={styles.brandLockup}>
           <View style={styles.brandMark}>
             <Image source={MIV_LOGO} style={styles.brandLogo} resizeMode="contain" />
@@ -1410,20 +1539,23 @@ export default function App() {
         </View>
 
         <View style={styles.headerActions}>
-          <RoundIconButton disabled={!canGoBack} Icon={ArrowLeft} onPress={() => webViewRef.current?.goBack()} />
-          <RoundIconButton disabled={!canGoForward} Icon={ArrowRight} onPress={() => webViewRef.current?.goForward()} />
+          <RoundIconButton disabled={!canGoBack} Icon={ArrowLeft} onPress={() => { beginNavigation(); webViewRef.current?.goBack(); }} />
+          <RoundIconButton disabled={!canGoForward} Icon={ArrowRight} onPress={() => { beginNavigation(); webViewRef.current?.goForward(); }} />
           <RoundIconButton Icon={Menu} onPress={() => setDrawerOpen(true)} variant="dark" />
         </View>
       </View>
 
-      <View style={styles.progressTrack}>
-        <View style={[styles.progressFill, { width: `${Math.max(loadProgress * 100, isLoading ? 8 : 0)}%` }]} />
-      </View>
+      {isLoading && !pipActive ? (
+        <View style={styles.progressTrack} accessibilityRole="progressbar" accessibilityValue={{ min: 0, max: 100, now: Math.round(loadProgress * 100) }}>
+          <Animated.View style={[styles.progressFill, { width: progressAnimation.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) }]} />
+        </View>
+      ) : null}
 
       <View style={styles.webSurface}>
         {isHydrated ? (
         <WebView
           ref={webViewRef}
+          onLayout={() => void device?.attach()}
           source={{ uri: sourceUri }}
           style={styles.webView}
           originWhitelist={['http://*', 'https://*', 'mivaunofficial://*']}
@@ -1438,17 +1570,26 @@ export default function App() {
           setSupportMultipleWindows={false}
           allowsBackForwardNavigationGestures
           allowsFullscreenVideo
+          allowsInlineMediaPlayback
+          allowsPictureInPictureMediaPlayback
           mediaPlaybackRequiresUserAction={false}
           pullToRefreshEnabled
+          overScrollMode="always"
           injectedJavaScript={injectedScript}
           injectedJavaScriptBeforeContentLoaded={injectedScript}
-          onLoadStart={() => setIsLoading(true)}
-          onLoadEnd={() => setIsLoading(false)}
-          onLoadProgress={(event) => setLoadProgress(event.nativeEvent.progress)}
+          onLoadStart={handleLoadStart}
+          onLoadEnd={handleLoadEnd}
+          onLoadProgress={(event) => {
+            setLoadProgress(loadingState.advance(event.nativeEvent.url, event.nativeEvent.progress));
+          }}
           onNavigationStateChange={onNavigationStateChange}
           onMessage={onMessage}
           onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
           onOpenWindow={onOpenWindow}
+          onFileDownload={(event) => {
+            finishNavigation(event.nativeEvent.downloadUrl);
+            void openPdfInBrowser(event.nativeEvent.downloadUrl);
+          }}
           renderError={renderError}
           startInLoadingState
           renderLoading={() => (
@@ -1462,13 +1603,22 @@ export default function App() {
             <ActivityIndicator color="#E3A325" size="large" />
           </View>
         )}
+        {isRefreshing ? (
+          <View pointerEvents="none" style={styles.refreshBubble}>
+            <ActivityIndicator color="#E3A325" size="small" />
+            <Text style={styles.refreshBubbleText}>Refreshing</Text>
+          </View>
+        ) : null}
       </View>
 
       <RightDrawer
         open={drawerOpen}
-        currentUrl={sourceUri}
+        currentUrl={currentUrl}
         onClose={() => setDrawerOpen(false)}
         onNavigate={navigateInApp}
+        onOpenExternal={openExternal}
+        onOpenSecureLogin={() => void openSecureLogin(true)}
+        onManageSecureLogin={() => void openSecureLogin(false)}
         onOpenSettings={() => {
           setDrawerOpen(false);
           setSettingsOpen(true);
@@ -1479,6 +1629,10 @@ export default function App() {
         }}
       />
 
+      <Sheet visible={secureLoginOpen} title="Secure Login" onClose={closeSecureLogin} immediateClose>
+        {secureLoginOpen ? <SecureLoginContent autoFill={secureLoginAutoFill} onFill={fillLogin} onClose={closeSecureLogin} /> : null}
+      </Sheet>
+
       <SettingsPanel
         open={settingsOpen}
         keepAwakeEnabled={keepAwakeEnabled}
@@ -1486,6 +1640,8 @@ export default function App() {
         reminder={reminder}
         onClose={() => setSettingsOpen(false)}
         onKeepAwakeChange={updateKeepAwakePreference}
+        resumePreviousSession={resumePreviousSession}
+        onResumePreviousSessionChange={updateResumePreviousSession}
         onSpeedChange={setSpeed}
         onQualityChange={setQuality}
         onReminderToggle={toggleReminder}
@@ -1517,15 +1673,21 @@ function RightDrawer({
   currentUrl,
   onClose,
   onNavigate,
+  onOpenExternal,
   onOpenSettings,
   onOpenMisc,
+  onOpenSecureLogin,
+  onManageSecureLogin,
 }: {
   open: boolean;
   currentUrl: string;
   onClose: () => void;
   onNavigate: (url: string) => void;
+  onOpenExternal: (url: string) => void;
   onOpenSettings: () => void;
   onOpenMisc: () => void;
+  onOpenSecureLogin: () => void;
+  onManageSecureLogin: () => void;
 }) {
   const insets = useSafeAreaInsets();
   const drawerTranslateX = useRef(new Animated.Value(360)).current;
@@ -1592,6 +1754,12 @@ function RightDrawer({
                       return;
                     }
 
+                    if (item.externalUrl) {
+                      onOpenExternal(item.externalUrl);
+                      closeDrawer();
+                      return;
+                    }
+
                     if (item.url) {
                       onNavigate(item.url);
                     }
@@ -1610,6 +1778,14 @@ function RightDrawer({
               }}
               onPress={onOpenMisc}
             />
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <View style={{ flex: 1 }}>
+                <DrawerMenuButton item={{ label: 'Secure Login', Icon: Fingerprint }} onPress={onOpenSecureLogin} />
+              </View>
+              <HapticPressable style={styles.drawerCloseButton} accessibilityLabel="Manage saved login" onPress={onManageSecureLogin}>
+                <Settings size={20} color="#FFFFFF" />
+              </HapticPressable>
+            </View>
           </View>
         </Animated.View>
       </View>
@@ -1694,10 +1870,12 @@ function RoundIconButton({
 function SettingsPanel({
   open,
   keepAwakeEnabled,
+  resumePreviousSession,
   preferences,
   reminder,
   onClose,
   onKeepAwakeChange,
+  onResumePreviousSessionChange,
   onSpeedChange,
   onQualityChange,
   onReminderToggle,
@@ -1706,10 +1884,12 @@ function SettingsPanel({
 }: {
   open: boolean;
   keepAwakeEnabled: boolean;
+  resumePreviousSession: boolean;
   preferences: VideoPreferences;
   reminder: ReminderSettings;
   onClose: () => void;
   onKeepAwakeChange: (enabled: boolean) => void;
+  onResumePreviousSessionChange: (enabled: boolean) => void;
   onSpeedChange: (speed: number) => void;
   onQualityChange: (quality: QualityPreference) => void;
   onReminderToggle: (enabled: boolean) => void;
@@ -1735,6 +1915,27 @@ function SettingsPanel({
             }}
             trackColor={{ false: '#DDE5DC', true: '#F0C263' }}
             thumbColor={keepAwakeEnabled ? '#E3A325' : '#FFFFFF'}
+          />
+        </View>
+      </View>
+
+      <View style={styles.settingCard}>
+        <View style={styles.settingRow}>
+          <View style={styles.settingTextBlock}>
+            <View style={styles.settingTitleRow}>
+              <History color="#E3A325" size={18} strokeWidth={2.4} />
+              <Text style={styles.settingTitle}>Startup behavior</Text>
+            </View>
+            <Text style={styles.settingCaption}>Resume the last page you visited instead of opening Home.</Text>
+          </View>
+          <Switch
+            value={resumePreviousSession}
+            onValueChange={(enabled) => {
+              playHaptic('selection');
+              onResumePreviousSessionChange(enabled);
+            }}
+            trackColor={{ false: '#DDE5DC', true: '#F0C263' }}
+            thumbColor={resumePreviousSession ? '#E3A325' : '#FFFFFF'}
           />
         </View>
       </View>
@@ -1976,24 +2177,27 @@ function Sheet({
   onClose,
   children,
   scrollable = true,
+  immediateClose = false,
 }: {
   visible: boolean;
   title: string;
   onClose: () => void;
   children: React.ReactNode;
   scrollable?: boolean;
+  immediateClose?: boolean;
 }) {
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const sheetTranslateY = useRef(new Animated.Value(40)).current;
 
   const closeSheet = useCallback(() => {
+    if (immediateClose) { onClose(); return; }
     Animated.timing(sheetTranslateY, {
       toValue: 520,
       duration: 170,
       useNativeDriver: true,
     }).start(() => onClose());
-  }, [onClose, sheetTranslateY]);
+  }, [immediateClose, onClose, sheetTranslateY]);
 
   useEffect(() => {
     if (!visible) {
@@ -2053,7 +2257,7 @@ function Sheet({
 
   return (
     <Modal visible={visible} transparent animationType="none" onRequestClose={closeSheet}>
-      <View style={styles.modalScrim}>
+      <KeyboardAvoidingView style={styles.modalScrim} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <HapticPressable style={StyleSheet.absoluteFill} pressScale={1} haptic="selection" onPress={closeSheet} />
         <Animated.View
           style={[
@@ -2073,7 +2277,7 @@ function Sheet({
           </View>
           {content}
         </Animated.View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -2167,6 +2371,31 @@ const styles = StyleSheet.create({
   webView: {
     flex: 1,
     backgroundColor: '#FFFFFF',
+  },
+  refreshBubble: {
+    position: 'absolute',
+    top: 12,
+    alignSelf: 'center',
+    minHeight: 36,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#EBD196',
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000000',
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 4,
+  },
+  refreshBubbleText: {
+    color: '#151B17',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0,
   },
   loadingState: {
     position: 'absolute',
@@ -2310,6 +2539,7 @@ const styles = StyleSheet.create({
   },
   drawerBottom: {
     marginTop: 'auto',
+    gap: 8,
   },
   drawerItem: {
     height: 52,

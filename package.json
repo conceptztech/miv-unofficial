@@ -1,6 +1,6 @@
 {
   "name": "miv-unofficial",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
@@ -14,17 +14,21 @@
     "build:ios:development": "npx eas-cli@latest build --profile development --platform ios",
     "build:ios:preview": "npx eas-cli@latest build --profile preview --platform ios",
     "build:ios:production": "npx eas-cli@latest build --profile production --platform ios",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.cjs"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~56.0.11",
-    "expo-dev-client": "~56.0.20",
+    "expo-dev-client": "~56.0.28",
     "expo-haptics": "~56.0.3",
     "expo-keep-awake": "~56.0.3",
-    "expo-notifications": "~56.0.17",
-    "expo-splash-screen": "~56.0.10",
+    "expo-local-authentication": "~56.0.5",
+    "expo-notifications": "~56.0.26",
+    "expo-secure-store": "~56.0.4",
+    "expo-splash-screen": "~56.0.16",
     "expo-updates": "~56.0.19",
+    "expo-web-browser": "~56.0.6",
     "lucide-react-native": "^1.17.0",
     "react": "19.2.3",
     "react-native": "0.85.3",

@@ -1,95 +1,102 @@
 {
-    "expo":  {
-                 "name":  "Miv Unofficial",
-                 "slug":  "miv-unofficial",
-                 "owner":  "creative-conceptz-solutions",
-                 "version":  "1.0.0",
-                 "orientation":  "portrait",
-                 "icon":  "./assets/miv-logo.png",
-                 "scheme":  "mivunofficial",
-                 "userInterfaceStyle":  "light",
-                 "runtimeVersion":  {
-                                        "policy":  "appVersion"
-                                    },
-                 "updates":  {
-                                 "enabled":  true,
-                                 "checkAutomatically":  "ON_LOAD",
-                                 "fallbackToCacheTimeout":  0,
-                                 "url":  "https://u.expo.dev/cc2df288-13fa-470b-afdd-c23599aee270"
-                             },
-                 "plugins":  [
-                                 [
-                                     "expo-splash-screen",
-                                     {
-                                         "image":  "./assets/miv-logo.png",
-                                         "resizeMode":  "contain",
-                                         "backgroundColor":  "#000000",
-                                         "imageWidth":  132
-                                     }
-                                 ],
-                                 [
-                                     "expo-notifications",
-                                     {
-                                         "color":  "#E3A325",
-                                         "sounds":  [
-                                                        "./assets/miv_reminder.wav"
-                                                    ]
-                                     }
-                                 ]
-                             ],
-                 "ios":  {
-                             "bundleIdentifier":  "com.mivunofficial.app",
-                             "supportsTablet":  true
-                         },
-                 "android":  {
-                                 "package":  "com.mivunofficial.app",
-                                 "adaptiveIcon":  {
-                                                      "foregroundImage":  "./assets/miv-logo.png",
-                                                      "backgroundColor":  "#000000"
-                                                  },
-                                 "intentFilters":  [
-                                                       {
-                                                           "action":  "VIEW",
-                                                           "data":  [
-                                                                        {
-                                                                            "scheme":  "https",
-                                                                            "host":  "lms.miva.university"
-                                                                        },
-                                                                        {
-                                                                            "scheme":  "https",
-                                                                            "host":  "support.miva.university"
-                                                                        },
-                                                                        {
-                                                                            "scheme":  "https",
-                                                                            "host":  "sis.miva.university"
-                                                                        },
-                                                                        {
-                                                                            "scheme":  "https",
-                                                                            "host":  "cas.miva.university"
-                                                                        },
-                                                                        {
-                                                                            "scheme":  "https",
-                                                                            "host":  "miva.university"
-                                                                        },
-                                                                        {
-                                                                            "scheme":  "https",
-                                                                            "host":  "miva.edu.ng"
-                                                                        }
-                                                                    ],
-                                                           "category":  [
-                                                                            "BROWSABLE",
-                                                                            "DEFAULT"
-                                                                        ]
-                                                       }
-                                                   ]
-                             },
-                 "web":  {
-                             "bundler":  "metro"
-                         },
-                 "extra":  {
-                               "eas":  {
-                                           "projectId":  "cc2df288-13fa-470b-afdd-c23599aee270"
-                                       }
-                           }
-             }
+  "expo": {
+    "name": "Miv Unofficial",
+    "slug": "miv-unofficial",
+    "owner": "creative-conceptz-solutions",
+    "version": "1.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/miv-logo.png",
+    "scheme": "mivunofficial",
+    "userInterfaceStyle": "light",
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "url": "https://u.expo.dev/cc2df288-13fa-470b-afdd-c23599aee270"
+    },
+    "plugins": [
+      "./plugins/withAndroidPiP",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/miv-logo.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#000000",
+          "imageWidth": 132
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#E3A325",
+          "sounds": [
+            "./assets/miv_reminder.wav"
+          ]
+        }
+      ],
+      [
+        "expo-secure-store",
+        { "faceIDPermission": "Use Face ID to unlock your saved Miva login." }
+      ],
+      [
+        "expo-local-authentication",
+        { "faceIDPermission": "Use Face ID to unlock your saved Miva login." }
+      ],
+      "expo-web-browser"
+    ],
+    "ios": {
+      "bundleIdentifier": "com.mivunofficial.app",
+      "supportsTablet": true,
+      "infoPlist": { "UIBackgroundModes": ["audio"] }
+    },
+    "android": {
+      "package": "com.mivunofficial.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/miv-logo.png",
+        "backgroundColor": "#000000"
+      },
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "https",
+              "host": "lms.miva.university"
+            },
+            {
+              "scheme": "https",
+              "host": "sis.miva.university"
+            },
+            {
+              "scheme": "https",
+              "host": "cas.miva.university"
+            },
+            {
+              "scheme": "https",
+              "host": "miva.university"
+            },
+            {
+              "scheme": "https",
+              "host": "miva.edu.ng"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        }
+      ]
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "cc2df288-13fa-470b-afdd-c23599aee270"
+      }
+    }
+  }
 }
