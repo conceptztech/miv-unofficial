@@ -61,11 +61,18 @@ export async function removeLogin(isActive: IsActive = () => true) {
 export const buildLoginFillScript = (details: LoginDetails) => `
 (function () {
   var ok = false;
-  if (location.origin === 'https://lms.miva.university' && /^\\/login\\//.test(location.pathname)) {
-    var password = document.querySelector('input[type="password"]');
-    var form = password && password.closest('form');
-    var username = form && form.querySelector('input[name="username"], input[autocomplete="username"], input[type="email"]');
-    if (form && username && form.method.toLowerCase() === 'post' && new URL(form.action || location.href, location.href).origin === location.origin) {
+  try {
+    var lmsPage = location.origin === 'https://lms.miva.university' && /^\\/login\\//.test(location.pathname);
+    var casPage = location.origin === 'https://sis.miva.university' && /^\\/cas\\/login\\/?$/.test(location.pathname);
+    if (window.top !== window || (!lmsPage && !casPage)) throw new Error('Unsupported sign-in page');
+    var password = document.querySelector(casPage ? 'input[name="password"]' : 'input[type="password"]');
+    var form = password && (password.form || password.closest('form'));
+    var username = casPage ? document.querySelector('input[name="email"]') : form && form.querySelector('input[name="username"], input[autocomplete="username"], input[type="email"]');
+    var usernameForm = username && (username.form || username.closest('form'));
+    var safeForm = form && usernameForm === form && form.method.toLowerCase() === 'post' && new URL(form.action || location.href, location.href).origin === location.origin;
+    // SIS uses Formik-controlled inputs and a Login button, not an HTML form.
+    var casInputs = casPage && password && username && !form && !usernameForm && !password.hasAttribute('form') && !username.hasAttribute('form') && (password.type === 'password' || password.type === 'text') && (username.type === 'email' || username.type === 'text');
+    if (password && username && !password.disabled && !username.disabled && !password.readOnly && !username.readOnly && (safeForm || casInputs)) {
       var details = ${JSON.stringify(details).replace(/</g, '\\u003c')};
       var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
       [[username, details.username], [password, details.password]].forEach(function (pair) {
@@ -77,7 +84,7 @@ export const buildLoginFillScript = (details: LoginDetails) => `
       details = null;
       ok = true;
     }
-  }
+  } catch (_) {}
   window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'login-filled', ok: ok }));
 })();
 true;

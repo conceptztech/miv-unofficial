@@ -32,7 +32,7 @@ Android PiP uses auto-enter on Android 12+ and the activity leave callback on An
 
 PDF links open through the system browser. Embedded PDFs have an Open PDF in browser action. The Android native download handler also catches PDFs without a file extension. Browser sessions are separate from WebView sessions, and the browser may require LMS sign-in. The browser and server ultimately determine whether the document is displayed or downloaded.
 
-Secure Login requires enrolled biometrics. Tap Secure Login to unlock and fill saved credentials; use its adjacent settings icon to manage them. New credentials are entered manually and stored using authenticated SecureStore, never AsyncStorage. Filling is restricted to the HTTPS LMS login form and never submits the form automatically. Unlocked details are cleared on background or close; biometric enrollment changes may invalidate saved credentials.
+Secure Login requires enrolled biometrics. Tap Secure Login to unlock and fill saved credentials; use its adjacent settings icon to manage them. New credentials are entered manually and stored using authenticated SecureStore, never AsyncStorage. Filling is restricted to the HTTPS LMS login form and the SIS `/cas/login` page, including its React-controlled email and password inputs. It never submits automatically. Unlocked details are cleared on background or close; biometric enrollment changes may invalidate saved credentials.
 
 The load bar starts on link taps, submissions, or native navigation commands, follows WebView's reported progress, and disappears after load completion or error. It is a page-load estimate rather than a percentage of downloaded bytes.
 
@@ -60,8 +60,8 @@ npm run build:android:production
 
 ## Credits
 
-Developed by [Creative Conceptz Solutions](https://conceptz.com.ng).
+Developed by [Creative Conceptz Solutions](https://conceptz.com.ng). First released June, 2026.
 
 ## Note
 
-This is an unofficial companion app. Public store distribution should use authorized Miva branding/assets and review Miva's terms before release.
+This is an unofficial companion app. Miva reserves all rights.

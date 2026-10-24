@@ -1436,7 +1436,7 @@ export default function App() {
       }
 
       if (message.type === 'login-filled') {
-        if (!message.ok) Alert.alert('Open the LMS login page', 'Secure Login fills the Miva LMS sign-in form. Open that page and try again.');
+        if (!message.ok) Alert.alert('Sign-in fields unavailable', 'Open the Miva SIS/CAS or LMS sign-in page, wait for the email and password fields to appear, then try Secure Login again.');
         return;
       }
 
